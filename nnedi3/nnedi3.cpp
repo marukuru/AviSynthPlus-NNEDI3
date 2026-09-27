@@ -22,13 +22,14 @@
 
 #include "./nnedi3.h"
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 // VS 2015
-#if _MSC_VER >= 1900
+#if _MSC_VER >= 1900 || defined(NNEDI3_X86_ASM)
 #define AVX2_BUILD_POSSIBLE
 #endif
 
 // VS 2019 v16.3
-#if _MSC_VER >= 1923
+#if _MSC_VER >= 1923 || defined(NNEDI3_X86_ASM)
 #define AVX512_BUILD_POSSIBLE
 #endif
 
@@ -146,13 +147,42 @@ extern "C" void weightedAvgElliottMul5_m16_AVX(const float *w,const int n,float 
 extern "C" void uc2s64_AVX(const uint8_t *t,const int pitch,float *p);
 extern "C" void computeNetwork0new_AVX(const float *datai,const float *weights,uint8_t *d);
 
+#endif
+
+#ifdef _WIN32
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+
+#else
+extern "C" const unsigned char nnedi3_weights[], nnedi3_weights_end[];
+#endif
 
 #define myfree(ptr) if (ptr!=nullptr) { free(ptr); ptr=nullptr;}
 #define myalignedfree(ptr) if (ptr!=nullptr) { _aligned_free(ptr); ptr=nullptr;}
 #define mydelete(ptr) if (ptr!=nullptr) { delete ptr; ptr=nullptr;}
 
+#ifdef _WIN32
 static ThreadPoolInterface *poolInterface;
+static const int default_threads = 0;
+#else
+// AviSynth+ Prefetch supplies frame-level parallelism by default.
+static const int default_threads = 1;
+#endif
+
+static void releaseLegacyThreads(int threads)
+{
+#ifdef _WIN32
+    if (threads > 1) poolInterface->DeAllocateAllThreads(true);
+#endif
+}
+
+#ifndef _WIN32
+static uint8_t resolveThreads(int threads, bool logical, int prefetch)
+{
+    if (threads != 0) return static_cast<uint8_t>(threads);
+    return static_cast<uint8_t>(min<unsigned>(MAX_MT_THREADS,
+        max(1u, available_cpus(logical) / max(1, prefetch))));
+}
+#endif
 
 int roundds(const double f)
 {
@@ -193,60 +223,74 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 {
 	if ((field<-2) || (field>3))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: field must be set to -2, -1, 0, 1, 2, or 3!");
 	}
 	if ((threads<0) || (threads>MAX_MT_THREADS))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: threads must be between 0 and %d inclusive!",MAX_MT_THREADS);
 	}
 	if (dh && ((field<-1) || (field>1)))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: field must be set to -1, 0, or 1 when dh=true!");
 	}
 	if ((nsize<0) || (nsize>=NUM_NSIZE))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: nsize must be in [0,%d]!\n",NUM_NSIZE-1);
 	}
 	if ((nns<0) || (nns>=NUM_NNS))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: nns must be in [0,%d]!\n",NUM_NNS-1);
 	}
 	if ((qual<1) || (qual>2))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: qual must be set to 1 or 2!\n");
 	}
 	if ((opt<0) || (opt>8))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: opt must be in [0,8]!");
 	}
+#ifndef _WIN32
+#ifdef NNEDI3_X86_ASM
+    const bool assembly_available = true;
+#else
+    const bool assembly_available = false;
+#endif
+    opt = resolveOptimization(opt, env->GetCPUFlags(), assembly_available);
+    if (opt < 0)
+        env->ThrowError("nnedi3: opt=%d (%s) is unavailable in this build or unsupported by the CPU/OS.",
+            _opt, optimizationName(_opt));
+#endif
 	if ((fapprox<0) || (fapprox>15))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: fapprox must be [0,15]!\n");
 	}
 	if ((pscrn<0) || (pscrn>4))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: pscrn must be [0,4]!\n");
 	}
 	if ((etype<0) || (etype>1))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: etype must be [0,1]!\n");
 	}
 	if ((range_mode<0) || (range_mode>4))
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: range must be [0,4]!\n");
 	}
 	
+    if (vi.width <= 0 || vi.height <= 0 || (!dh && vi.height < (vi.Is420() ? 4 : 2)))
+        env->ThrowError("nnedi3: input is too small to contain a source field in every plane.");
+
 	grey = vi.IsY();
 	isRGBPfamily = vi.IsPlanarRGB() || vi.IsPlanarRGBA();
 	isAlphaChannel = vi.IsYUVA() || vi.IsPlanarRGBA();
@@ -335,11 +379,14 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 
 	if (vi.height<32) threads_number=1;
 	else threads_number=threads;
+#ifndef _WIN32
+    threads_number = min<int>(threads_number, max(1, vi.height / 16));
+#endif
 
 	srcPF = new PlanarFrame();
 	if (srcPF==nullptr)
 	{
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: Error while creating srcPF!");
 	}
 	if (vi.Is420())
@@ -347,7 +394,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (!srcPF->createPlanar(vi.height+12,(vi.height>>1)+12,vi.width+64,(vi.width>>1)+64,isRGBPfamily,isAlphaChannel,pixelsize,bits_per_pixel))
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Error while creating planar for srcPF!");
 		}
 	}
@@ -358,7 +405,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 			if (!srcPF->createPlanar(vi.height+12,vi.height+12,vi.width+64,(vi.width>>2)+64,isRGBPfamily,isAlphaChannel,pixelsize,bits_per_pixel))
 			{
 				FreeData();
-				if (threads>1) poolInterface->DeAllocateAllThreads(true);
+				releaseLegacyThreads(threads);
 				env->ThrowError("nnedi3: Error while creating planar for srcPF!");
 			}
 		}
@@ -369,7 +416,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				if (!srcPF->createPlanar(vi.height+12,vi.height+12,vi.width+64,(vi.width>>1)+64,isRGBPfamily,isAlphaChannel,pixelsize,bits_per_pixel))
 				{
 					FreeData();
-					if (threads>1) poolInterface->DeAllocateAllThreads(true);
+					releaseLegacyThreads(threads);
 					env->ThrowError("nnedi3: Error while creating planar for srcPF!");
 				}
 			}
@@ -380,7 +427,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 					if (!srcPF->createPlanar(vi.height+12,vi.height+12,vi.width+64,vi.width+64,isRGBPfamily,isAlphaChannel,pixelsize,bits_per_pixel))
 					{
 						FreeData();
-						if (threads>1) poolInterface->DeAllocateAllThreads(true);
+						releaseLegacyThreads(threads);
 						env->ThrowError("nnedi3: Error while creating planar for srcPF!");
 					}
 				}
@@ -391,7 +438,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 						if (!srcPF->createPlanar(vi.height+12,0,vi.width+64,0,isRGBPfamily,isAlphaChannel,pixelsize,bits_per_pixel))
 						{
 							FreeData();
-							if (threads>1) poolInterface->DeAllocateAllThreads(true);
+							releaseLegacyThreads(threads);
 							env->ThrowError("nnedi3: Error while creating planar for srcPF!");
 						}
 						U = false;
@@ -407,18 +454,19 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 	if (dstPF==nullptr)
 	{
 		FreeData();
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: Error while creating dstPF!");
 	}
 	if (!dstPF->GetAllocStatus())
 	{
 		FreeData();
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: Error while allocating planar dstPF!");
 	}
 	
 	bool AVX512 = false;
 	
+#ifdef _WIN32
 	if (opt==0)
 	{
 		const int CPUF=env->GetCPUFlags();
@@ -475,6 +523,10 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		}
 	}
 
+#else
+    if (opt == 8) { AVX512 = true; opt = 6; }
+#endif
+
 	if (nsize==0) AVX512=false; // AVX-512 not compatible with asize not multiple of 32.
 
 	const int dims0 = 49*4+5*4+9*4;
@@ -499,7 +551,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 	if (weights0==nullptr)
 	{
 		FreeData();
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: Error while allocating weights0!");
 	}
 	std::fill_n(weights0,SizeAllocDim0>>2,0.0f);
@@ -511,7 +563,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (weights1[i]==nullptr)
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Error while allocating weights1[%d]!",i);
 		}
 		std::fill_n(weights1[i],SizeAllocDim1>>2,0.0f);
@@ -522,17 +574,18 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (lcount[i]==nullptr)
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Error while allocating lcount[%d]!",i);
 		}
 	}
+#ifdef _WIN32
 	char nbuf[512];
 	GetModuleFileName((HINSTANCE)&__ImageBase,nbuf,512);
 	HMODULE hmod = GetModuleHandle(nbuf);
 	if (hmod==nullptr)
 	{
 		FreeData();
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: unable to get module handle!");
 	}
 	HRSRC hrsrc = FindResource(hmod,MAKEINTRESOURCE(101),_T("BINARY"));
@@ -542,13 +595,32 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 	if ((hmod==nullptr) || (hrsrc==nullptr) || (hglob==nullptr) || (lplock==nullptr) || (dwSize!=(dims0+dims0new*3+dims1tsize*2)*sizeof(float)))
 	{
 		FreeData();
-		if (threads>1) poolInterface->DeAllocateAllThreads(true);
+		releaseLegacyThreads(threads);
 		env->ThrowError("nnedi3: error loading resource (%x,%x,%x,%x,%d,%d)!",hmod,hrsrc,hglob,lplock,dwSize,
 		(dims0+dims0new*3+dims1tsize*2)*sizeof(float));
 	}
 
 	float *bdata = (float *)lplock;
 
+#else
+    const size_t weights_size = reinterpret_cast<uintptr_t>(nnedi3_weights_end) - reinterpret_cast<uintptr_t>(nnedi3_weights);
+    if (weights_size != (dims0+dims0new*3+dims1tsize*2)*sizeof(float)) {
+        FreeData();
+        env->ThrowError("nnedi3: invalid embedded neural network weights.");
+    }
+    const float *bdata = reinterpret_cast<const float *>(nnedi3_weights);
+#endif
+
+    // The integer prescreeners accumulate signed 16-bit products into int32.
+    // Use the unsigned, wide C++ versions for 15/16-bit pixels.
+#ifdef _WIN32
+    const bool widePrescreener = false;
+#else
+    const bool widePrescreener = bits_per_pixel > 14 && pixelsize == 2 &&
+        (pscrn >= 2 || int16_prescreener);
+#endif
+    const int prescreenerOpt = widePrescreener ? 1 : opt;
+    const bool prescreenerAVX512 = AVX512 && !widePrescreener;
 	// Adjust prescreener weights
 	if (pscrn>=2) // using new prescreener
 	{
@@ -567,7 +639,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 
 		j_a=0,j_b=0;
 		
-		if (AVX512)
+		if (prescreenerAVX512)
 		{
 			for (int j=0; j<4; j++)
 			{
@@ -580,7 +652,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		}
 		else
 		{
-			if (opt>=5)
+			if (prescreenerOpt>=5)
 			{
 				for (int j=0; j<4; j++)
 				{
@@ -622,7 +694,11 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		}
 
 		// 16 bit pixels will be shifted by 1 for the prescreener.
-		const int prescreener_bits = min((int)bits_per_pixel,15);
+		#ifdef _WIN32
+            const int prescreener_bits = min((int)bits_per_pixel,15);
+#else
+            const int prescreener_bits = bits_per_pixel;
+#endif
 		const double half = (((int)1 << prescreener_bits)-1)/2.0;
 
 		// Factor mean removal and 1.0/half scaling
@@ -663,14 +739,18 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (int16_prescreener) // use int16 dot products in first layer
 		{
 			int16_t *ws = (int16_t *)weights0;
-			float *wf = (AVX512)?(float *)&ws[4*64]:(float *)&ws[4*48];
+			float *wf = (prescreenerAVX512)?(float *)&ws[4*64]:(float *)&ws[4*48];
 			int j_b=0;
 
 			// 16 bit pixels will be shifted by 1 for the prescreener.
-			const int prescreener_bits = min((int)bits_per_pixel,15);
+			#ifdef _WIN32
+            const int prescreener_bits = min((int)bits_per_pixel,15);
+#else
+            const int prescreener_bits = bits_per_pixel;
+#endif
 			const double half = (((int)1 << prescreener_bits)-1)/2.0;
 			
-			if (AVX512) memset(ws,0,(64*4)*sizeof(int16_t));
+			if (prescreenerAVX512) memset(ws,0,(64*4)*sizeof(int16_t));
 
 			// Factor mean removal and 1.0/half scaling
 			// into first layer weights. scale to int16 range
@@ -689,18 +769,18 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 
 				wf[j] = (float)(mval/32767.0);
 				j_a+=48;
-				j_b+=(AVX512)?64:48;
+				j_b+=(prescreenerAVX512)?64:48;
 			}
 			memcpy(wf+4,bdata+4*48,(dims0-4*48)*sizeof(float));
 
-			if ((opt>1) && (bits_per_pixel<=14))// shuffle weight order for asm
+			if ((prescreenerOpt>1) && (bits_per_pixel<=14))// shuffle weight order for asm
 			{
 				int16_t *rs = (int16_t*)malloc(dims0*sizeof(float));
 
 				if (rs==nullptr)
 				{
 					FreeData();
-					if (threads>1) poolInterface->DeAllocateAllThreads(true);
+					releaseLegacyThreads(threads);
 					env->ThrowError("nnedi3: Error while allocating rs!");
 				}
 
@@ -708,7 +788,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 
 				j_a=0;
 				j_b=0;
-				if (AVX512)
+				if (prescreenerAVX512)
 				{
 					memset(ws,0,(64*4)*sizeof(int16_t));
 
@@ -722,7 +802,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				}
 				else
 				{
-					if (opt>=5)
+					if (prescreenerOpt>=5)
 					{
 						for (int j=0; j<4; j++)
 						{
@@ -743,16 +823,14 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 						}
 					}
 				}
-				if (AVX512) shufflePreScrnL2L3(wf+8,((float*)&rs[4*64])+8,opt);
-				else shufflePreScrnL2L3(wf+8,((float*)&rs[4*48])+8,opt);
+				if (prescreenerAVX512) shufflePreScrnL2L3(wf+8,((float*)&rs[4*64])+8,prescreenerOpt);
+				else shufflePreScrnL2L3(wf+8,((float*)&rs[4*48])+8,prescreenerOpt);
 				free(rs);
 			}
 		}
 		else // use float dot products in first layer
 		{
-			double half = ((int)1 << bits_per_pixel)-1;
-
-			if (pixelsize==4) half = 1.0;
+			double half = pixelsize == 4 ? 1.0 : (1u << bits_per_pixel) - 1.0;
 			half /= 2.0;
 
 			// Factor mean removal and 1.0/half scaling
@@ -766,7 +844,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 			}
 			memcpy(weights0+4*48,bdata+4*48,(dims0-4*48)*sizeof(float));
 
-			if (opt>1) // shuffle weight order for asm
+			if (prescreenerOpt>1) // shuffle weight order for asm
 			{
 				float *wf = weights0;
 				float *rf = (float*)malloc(dims0*sizeof(float));
@@ -774,7 +852,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				if (rf==nullptr)
 				{
 					FreeData();
-					if (threads>1) poolInterface->DeAllocateAllThreads(true);
+					releaseLegacyThreads(threads);
 					env->ThrowError("nnedi3: Error while allocating rf!");
 				}
 
@@ -783,7 +861,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				int j_b=0;
 				
 				j_a=0;
-				if (AVX512)
+				if (prescreenerAVX512)
 				{
 					for (int j=0; j<4; j++)
 					{
@@ -795,7 +873,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				}
 				else
 				{
-					if (opt>=5)
+					if (prescreenerOpt>=5)
 					{
 						for (int j=0; j<4; j++)
 						{
@@ -816,7 +894,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 						}
 					}
 				}
-				shufflePreScrnL2L3(wf+4*49,rf+4*49,opt);
+				shufflePreScrnL2L3(wf+4*49,rf+4*49,prescreenerOpt);
 				free(rf);
 			}
 		}
@@ -834,7 +912,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (mean==nullptr)
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Error while allocating mean!");
 		}
 
@@ -918,7 +996,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 				{
 					free(mean);
 					FreeData();
-					if (threads>1) poolInterface->DeAllocateAllThreads(true);
+					releaseLegacyThreads(threads);
 					env->ThrowError("nnedi3: Error while allocating rs!");
 				}
 
@@ -1082,7 +1160,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if (NNPixels[i]==nullptr)
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Unable to create NNPixels[%d]!",i);
 		}
 	}
@@ -1097,7 +1175,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		if ((pssInfo[i].input==nullptr) || (pssInfo[i].temp==nullptr) || (pssInfo[i].val_min_max==nullptr))
 		{
 			FreeData();
-			if (threads>1) poolInterface->DeAllocateAllThreads(true);
+			releaseLegacyThreads(threads);
 			env->ThrowError("nnedi3: Error while allocating pssInfo[%d]!",i);
 		}
 		pssInfo[i].weights0 = weights0;
@@ -1106,7 +1184,10 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		pssInfo[i].qual = qual;
 		pssInfo[i].pscrn = pscrn;
 		pssInfo[i].env = env;
-		pssInfo[i].opt = opt;
+        pssInfo[i].opt = opt;
+#ifndef _WIN32
+        pssInfo[i].integerDotProduct = _opt == 0 ? selectIntegerDotProduct(env->GetCPUFlags(), pixelsize > 1) : nullptr;
+#endif
 		pssInfo[i].AVX512 = AVX512;
 		pssInfo[i].Y = Y;
 		pssInfo[i].U = U;
@@ -1139,6 +1220,7 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 		}
 	}
 
+#ifdef _WIN32
 	if (threads_number>1)
 	{
 		if (!poolInterface->GetUserId(UserId))
@@ -1156,6 +1238,8 @@ nnedi3::nnedi3(PClip _child,int _field,bool _dh,bool _Y,bool _U,bool _V,bool _A,
 			}
 		}
 	}
+
+#endif
 
 	has_at_least_v8=true;
 	try { env->CheckVersion(8); } catch (const AvisynthError&) { has_at_least_v8=false; }
@@ -1196,9 +1280,13 @@ void nnedi3::FreeData(void)
 
 nnedi3::~nnedi3()
 {
-	if (threads_number>1) poolInterface->RemoveUserId(UserId);
+#ifdef _WIN32
+    if (threads_number>1) poolInterface->RemoveUserId(UserId);
+#else
+    executor.reset();
+#endif
 	FreeData();
-	if (threads>1) poolInterface->DeAllocateAllThreads(true);
+	releaseLegacyThreads(threads);
 }
 
 
@@ -1224,7 +1312,14 @@ PVideoFrame __stdcall nnedi3::GetFrame(int n, IScriptEnvironment *env)
 	const int x = (field>1)?(n>>1):n;
 	PVideoFrame src = child->GetFrame(x,env);
 
-	copyPad(src,field_n,env);
+#ifndef _WIN32
+    if (threads_number > 1 && !executor) {
+        try { executor.reset(new ParallelExecutor(threads_number)); }
+        catch (const std::exception &e) { env->ThrowError("nnedi3: creating workers: %s", e.what()); }
+    }
+#endif
+    for (uint8_t i = 0; i < threads_number; ++i) pssInfo[i].env = env;
+    copyPad(src,field_n,env);
 	
 	const uint8_t PlaneMax=(grey) ? 1:(isAlphaChannel) ? 4:3;
 	int plane[4];
@@ -1279,10 +1374,14 @@ PVideoFrame __stdcall nnedi3::GetFrame(int n, IScriptEnvironment *env)
 	
 	if (threads_number>1)
 	{
+#ifdef _WIN32
 		if (!poolInterface->RequestThreadPool(UserId,threads_number,MT_Thread,-1,false))
 			env->ThrowError("nnedi3: Error with the TheadPool while requesting threadpool !");
 		
 		if (poolInterface->StartThreads(UserId)) poolInterface->WaitThreadsEnd(UserId);
+#else
+        executor->run(MT_Thread);
+#endif
 	}
 	else
 	{
@@ -1320,12 +1419,16 @@ PVideoFrame __stdcall nnedi3::GetFrame(int n, IScriptEnvironment *env)
 		for (uint8_t i=0; i<threads_number; i++)
 			MT_Thread[i].f_process=f_proc_2;
 		
+#ifdef _WIN32
 		if (poolInterface->StartThreads(UserId)) poolInterface->WaitThreadsEnd(UserId);
 
 		for (uint8_t i=0; i<threads_number; i++)
 			MT_Thread[i].f_process=0;
 
 		poolInterface->ReleaseThreadPool(UserId,sleep);
+#else
+        executor->run(MT_Thread);
+#endif
 	}
 	else
 	{
@@ -1372,6 +1475,42 @@ PVideoFrame __stdcall nnedi3::GetFrame(int n, IScriptEnvironment *env)
 	return dst;
 }
 
+
+// Reflect in the actual source samples, including planes narrower than the
+// 32-pixel border and fields with fewer than four rows.
+static int mirrorIndex(int index, int size)
+{
+    if (size <= 1) return 0;
+    const int period = 2 * (size - 1);
+    index %= period;
+    if (index < 0) index += period;
+    return index < size ? index : period - index;
+}
+
+template<typename Pixel>
+static void padPlane(uint8_t *data, int pitch, int width, int height, int off)
+{
+    const int samples = width - 64;
+    const int rows = (height - 12) / 2;
+    int left[32], right[32];
+    for (int x = 0; x < 32; ++x) {
+        left[x] = 32 + mirrorIndex(x - 32, samples);
+        right[x] = 32 + mirrorIndex(samples + x, samples);
+    }
+    for (int y = 0; y < rows; ++y) {
+        Pixel *row = reinterpret_cast<Pixel *>(data + (6 + off + 2*y) * pitch);
+        for (int x = 0; x < 32; ++x) {
+            row[x] = row[left[x]];
+            row[width - 32 + x] = row[right[x]];
+        }
+    }
+    for (int y = off; y < height; y += 2) {
+        const int index = (y - 6 - off) / 2;
+        if (index >= 0 && index < rows) continue;
+        const int source = 6 + off + 2 * mirrorIndex(index, rows);
+        memcpy(data + y*pitch, data + source*pitch, width * sizeof(Pixel));
+    }
+}
 
 void nnedi3::copyPad(PVideoFrame &src, int fn, IScriptEnvironment *env)
 {
@@ -1424,7 +1563,7 @@ void nnedi3::copyPad(PVideoFrame &src, int fn, IScriptEnvironment *env)
 						srcPF->GetPtr(0)+(srcPF->GetPitch(0)*(6+off)+32),
 						srcPF->GetPtr(1)+(srcPF->GetPitch(1)*(6+off)+32),
 						srcPF->GetPtr(2)+(srcPF->GetPitch(2)*(6+off)+32),
-						-src->GetPitch() << 1,srcPF->GetPitch(0) << 1,srcPF->GetPitch(1) << 1,
+						-src->GetPitch() * 2,srcPF->GetPitch(0) << 1,srcPF->GetPitch(1) << 1,
 						vi.width,vi.height>>1);
 				}
 			}
@@ -1466,90 +1605,13 @@ void nnedi3::copyPad(PVideoFrame &src, int fn, IScriptEnvironment *env)
 		}
 	}
 
-	for (uint8_t b=0; b<PlaneMax; b++)
-	{
-		uint8_t *dstp = srcPF->GetPtr(b);
-		const int dst_pitch = srcPF->GetPitch(b);
-		const int dst_pitch2 = dst_pitch << 1;
-		const int height = srcPF->GetHeight(b);
-		const int height_6 = height-6;
-		const int width = srcPF->GetWidth(b);
-		const int width_ = width*(int)pixelsize;
-
-		dstp += (6+off)*dst_pitch;
-		if (pixelsize==1)
-		{
-			for (int y=6+off; y<height_6; y+=2)
-			{
-				for (int x=0; x<32; x++)
-					dstp[x] = dstp[64-x];
-
-				int x_c = width-34;
-
-				for (int x=width-32; x<width; x++)
-					dstp[x] = dstp[x_c--];
-
-				dstp += dst_pitch2;
-			}
-		}
-		else
-		{
-			if (pixelsize==2)
-			{
-				for (int y=6+off; y<height_6; y+=2)
-				{
-					uint16_t *dst0 = (uint16_t *)dstp;
-
-					for (int x=0; x<32; x++)
-						dst0[x] = dst0[64-x];
-
-					int x_c = width-34;
-
-					for (int x=width-32; x<width; x++)
-						dst0[x] = dst0[x_c--];
-
-					dstp += dst_pitch2;
-				}
-			}
-			else
-			{
-				for (int y=6+off; y<height_6; y+=2)
-				{
-					float *dst0 = (float *)dstp;
-
-					for (int x=0; x<32; x++)
-						dst0[x] = dst0[64-x];
-
-					int x_c = width-34;
-
-					for (int x=width-32; x<width; x++)
-						dst0[x] = dst0[x_c--];
-
-					dstp += dst_pitch2;
-				}
-			}
-		}
-
-		dstp = srcPF->GetPtr(b);
-
-		int off1=off*dst_pitch,off2=(12+off)*dst_pitch;
-
-		for (int y=off; y<6; y+=2)
-		{
-			memcpy(dstp+off1,dstp+off2,width_);
-			off1+=dst_pitch2;
-			off2-=dst_pitch2;
-		}
-
-		off1=(height-6+off)*dst_pitch;
-		off2=(height-10+off)*dst_pitch;
-		for (int y=height-6+off; y<height; y+=2)
-		{
-			memcpy(dstp+off1,dstp+off2,width_);
-			off1+=dst_pitch2;
-			off2-=dst_pitch2;
-		}
-	}
+    for (uint8_t b = 0; b < PlaneMax; ++b) {
+        uint8_t *data = srcPF->GetPtr(b);
+        const int pitch = srcPF->GetPitch(b), width = srcPF->GetWidth(b), height = srcPF->GetHeight(b);
+        if (pixelsize == 1) padPlane<uint8_t>(data, pitch, width, height, off);
+        else if (pixelsize == 2) padPlane<uint16_t>(data, pitch, width, height, off);
+        else padPlane<float>(data, pitch, width, height, off);
+    }
 }
 
 
@@ -1765,6 +1827,7 @@ int processLine0_C(const uint8_t *tempu, int width, uint8_t *dstp, const uint8_t
 }
 
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 int processLine0_SSE2(const uint8_t *tempu, int width, uint8_t *dstp, const uint8_t *src3p, const int src_pitch,const uint16_t *val_min_max)
 {
 	int count;
@@ -1814,6 +1877,8 @@ int processLine0_AVX512(const uint8_t *tempu, int width, uint8_t *dstp, const ui
 
 
 // new prescreener functions
+
+#endif
 
 void uc2s64_C(const uint8_t *t, const int pitch, float *p)
 {
@@ -1868,7 +1933,7 @@ void computeNetwork0new_C(const float *datai, const float *weights, uint8_t *d)
 		if (vals[4 + i]>0.0f)
 			mask |= (0x1 << (i << 3));
 	}
-	*((int*)d) = mask;
+	for (int i=0; i<4; ++i) d[i] = (mask >> (i*8)) & 1;
 }
 
 
@@ -1886,6 +1951,7 @@ void evalFunc_1(void *ps)
 	int (*processLine0)(const uint8_t*,int,uint8_t*,const uint8_t*,const int,const uint16_t*);
 	uint16_t *data16=pss->val_min_max;
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512) processLine0=processLine0_AVX512;
 	else
@@ -2037,6 +2103,12 @@ void evalFunc_1(void *ps)
 			}
 		}
 	}
+
+#else
+    processLine0 = processLine0_C;
+    uc2s = pscrn >= 2 ? uc2s64_C : (int16_prescreener ? uc2s48_C : uc2f48_C);
+    computeNetwork0 = pscrn >= 2 ? computeNetwork0new_C : (int16_prescreener ? computeNetwork0_i16_C : computeNetwork0_C);
+#endif
 
 	uint8_t b = pss->current_plane;
 
@@ -2219,7 +2291,7 @@ void dotProdS_C_16(const float *dataf,const float *weightsf,float *vals,const in
 
 	for (int i=0; i<n; i++)
 	{
-		__int64 sum = 0;
+		int64_t sum = 0;
 		const int off = ((i>>2)<<3)+(i&3);
 
 		for (int j=0; j<len; j++)
@@ -2260,7 +2332,7 @@ void computeNetwork0new_C_16(const float *datai, const float *weights, uint8_t *
 
 	for (int i=0; i<4; i++)
 	{
-		__int64 sum = 0;
+		int64_t sum = 0;
 		const int i_3 = i << 3;
 
 		for (int j=0; j<64; j++)
@@ -2288,10 +2360,11 @@ void computeNetwork0new_C_16(const float *datai, const float *weights, uint8_t *
 		if (vals[4+i]>0.0f)
 			mask |= (0x1 << (i<<3));
 	}
-	*((int*)d) = mask;
+	for (int i=0; i<4; ++i) d[i] = (mask >> (i*8)) & 1;
 }
 
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 int processLine0_SSE2_16(const uint8_t *tempu, int width, uint8_t *dstp, const uint8_t *src3p, const int src_pitch,const uint16_t *val_min_max)
 {
 	int count;
@@ -2344,6 +2417,8 @@ int processLine0_AVX512_16(const uint8_t *tempu, int width, uint8_t *dstp, const
 #endif
 
 
+#endif
+
 void evalFunc_1_16(void *ps)
 {
 	PS_INFO *pss = (PS_INFO *)ps;
@@ -2359,6 +2434,7 @@ void evalFunc_1_16(void *ps)
 	int(*processLine0)(const uint8_t*, int, uint8_t*, const uint8_t*, const int,const uint16_t *);
 	uint16_t *data16=pss->val_min_max;
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512) processLine0=processLine0_AVX512_16;
 	else
@@ -2476,6 +2552,19 @@ void evalFunc_1_16(void *ps)
 			}
 		}
 	}
+
+#else
+    processLine0 = processLine0_C_16;
+    uc2s = pscrn >= 2 ? uc2s64_C_16 : (int16_prescreener ? uc2s48_C_16 : uc2f48_C_16);
+    computeNetwork0 = pscrn >= 2 ? computeNetwork0new_C_16 : (int16_prescreener ? computeNetwork0_i16_C_16 : computeNetwork0_C);
+#endif
+
+#ifndef _WIN32
+    if (bits_per_pixel > 14 || opt == 1) {
+        if (pscrn >= 2) computeNetwork0 = computeNetwork0new_C_16;
+        else if (int16_prescreener) computeNetwork0 = computeNetwork0_i16_C_16;
+    }
+#endif
 
 	uint8_t b = pss->current_plane;
 
@@ -2619,6 +2708,7 @@ void uc2f48_C_32(const uint8_t *t, const int pitch, float *p)
 }
 
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 int processLine0_SSE2_32(const uint8_t *tempu, int width, uint8_t *dstp, const uint8_t *src3p, const int src_pitch)
 {
 	int count;
@@ -2671,6 +2761,8 @@ int processLine0_AVX512_32(const uint8_t *tempu, int width, uint8_t *dstp, const
 #endif
 
 
+#endif
+
 void evalFunc_1_32(void *ps)
 {
 	PS_INFO *pss = (PS_INFO *)ps;
@@ -2684,6 +2776,7 @@ void evalFunc_1_32(void *ps)
 	int(*processLine0)(const uint8_t*, int, uint8_t*, const uint8_t*, const int);
 
 	uc2s=uc2f48_C_32;
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512)
 	{
@@ -2727,6 +2820,11 @@ void evalFunc_1_32(void *ps)
 			}
 		}
 	}
+
+#else
+    processLine0 = processLine0_C_32;
+    computeNetwork0 = computeNetwork0_C;
+#endif
 
 	uint8_t b = pss->current_plane;
 
@@ -2855,15 +2953,15 @@ void extract_m8_i16_C(const uint8_t *srcp,const int stride,const int xdia,const 
 }
 
 
-__declspec(align(16)) const float exp_lo[4] = { -80.0f, -80.0f, -80.0f, -80.0f };
-__declspec(align(16)) const float exp_hi[4] = { +80.0f, +80.0f, +80.0f, +80.0f };
+alignas(16) const float exp_lo[4] = { -80.0f, -80.0f, -80.0f, -80.0f };
+alignas(16) const float exp_hi[4] = { +80.0f, +80.0f, +80.0f, +80.0f };
 
 // exp from:  A Fast, Compact Approximation of the Exponential Function (1998)
 //            Nicol N. Schraudolph
 
-__declspec(align(16)) const float e0_mult[4] = { // (1.0/ln(2))*(2^23)
+alignas(16) const float e0_mult[4] = { // (1.0/ln(2))*(2^23)
 	12102203.161561486f, 12102203.161561486f, 12102203.161561486f, 12102203.161561486f };
-__declspec(align(16)) const float e0_bias[4] = { // (2^23)*127.0-486411.0
+alignas(16) const float e0_bias[4] = { // (2^23)*127.0-486411.0
 	1064866805.0f, 1064866805.0f, 1064866805.0f, 1064866805.0f };
 
 void e0_m16_C(float *s,const int n)
@@ -2871,19 +2969,19 @@ void e0_m16_C(float *s,const int n)
 	for (int i=0; i<n; i++)
 	{
 		const int t = (int)(max(min(s[i],exp_hi[0]),exp_lo[0])*e0_mult[0]+e0_bias[0]);
-		s[i] = (*((float*)&t));
+		memcpy(s+i, &t, sizeof(t));
 	}
 }
 
 // exp from Loren Merritt
 
-_declspec(align(16)) const float e1_scale[4] = { // 1/ln(2)
+alignas(16) const float e1_scale[4] = { // 1/ln(2)
 	1.4426950409f, 1.4426950409f, 1.4426950409f, 1.4426950409f };
-_declspec(align(16)) const float e1_bias[4] = { // 3<<22
+alignas(16) const float e1_bias[4] = { // 3<<22
 	12582912.0f, 12582912.0f, 12582912.0f, 12582912.0f };
-_declspec(align(16)) const float e1_c0[4] = { 1.00035f, 1.00035f, 1.00035f, 1.00035f };
-_declspec(align(16)) const float e1_c1[4] = { 0.701277797f, 0.701277797f, 0.701277797f, 0.701277797f };
-_declspec(align(16)) const float e1_c2[4] = { 0.237348593f, 0.237348593f, 0.237348593f, 0.237348593f };
+alignas(16) const float e1_c0[4] = { 1.00035f, 1.00035f, 1.00035f, 1.00035f };
+alignas(16) const float e1_c1[4] = { 0.701277797f, 0.701277797f, 0.701277797f, 0.701277797f };
+alignas(16) const float e1_c2[4] = { 0.237348593f, 0.237348593f, 0.237348593f, 0.237348593f };
 
 void e1_m16_C(float *s,const int n)
 {
@@ -2894,7 +2992,9 @@ void e1_m16_C(float *s,const int n)
 		x -= i;
 		x = e1_c0[0] + e1_c1[0]*x + e1_c2[0]*x*x;
 		i = (i+127)<<23;
-		s[q] = x * *((float*)&i);
+		float power;
+        memcpy(&power, &i, sizeof(power));
+        s[q] = x * power;
 	}
 }
 
@@ -2905,7 +3005,7 @@ void e2_m16_C(float *s,const int n)
 }
 
 
-__declspec(align(16)) const float min_weight_sum[4] = { 1e-10f, 1e-10f, 1e-10f, 1e-10f };
+alignas(16) const float min_weight_sum[4] = { 1e-10f, 1e-10f, 1e-10f, 1e-10f };
 
 void weightedAvgElliottMul5_m16_C(const float *w,const int n,float *mstd)
 {
@@ -2945,6 +3045,7 @@ void evalFunc_2(void *ps)
 	void (*wae5)(const float*,const int,float*);
 
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512)
 	{
@@ -3098,6 +3199,13 @@ void evalFunc_2(void *ps)
 		}
 	}
 
+#else
+    extract = int16_predictor ? extract_m8_i16_C : extract_m8_C;
+    dotProd = int16_predictor ? (pss->integerDotProduct ? pss->integerDotProduct : dotProdS_C) : dotProd_C;
+    wae5 = weightedAvgElliottMul5_m16_C;
+    expf = (fapprox & 12) == 0 ? e2_m16_C : ((fapprox & 12) == 4 ? e1_m16_C : e0_m16_C);
+#endif
+
 	uint8_t b = pss->current_plane;
 
 	if (((b==0) && pss->Y) || ((b==1) && pss->U) || ((b==2) && pss->V) || ((b==3) && pss->A))
@@ -3168,6 +3276,7 @@ void evalFunc_2(void *ps)
 				NNPixels+=NNPixels_pitch_2;
 			}
 		}
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 		else
 		{
 			if (opt>=4)
@@ -3219,6 +3328,7 @@ void evalFunc_2(void *ps)
 				}
 			}
 		}
+#endif
 	}
 }
 
@@ -3259,6 +3369,7 @@ void extract_m8_i16_C_16(const uint8_t *srcp,const int stride,const int xdia,con
 }
 
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 void extract_m8_i16_C_16_2(const uint8_t *srcp, const int stride, const int xdia, const int ydia, float *mstd, float *inputf)
 {
 	int64_t sumsq;
@@ -3324,6 +3435,8 @@ void extract_m8_i16_C_16_4(const uint8_t *srcp, const int stride, const int xdia
 #endif
 
 
+#endif
+
 void extract_m8_C_16(const uint8_t *srcp,const int stride,const int xdia,const int ydia,float *mstd,float *input)
 {
 	int64_t sum = 0, sumsq = 0;
@@ -3381,6 +3494,7 @@ void evalFunc_2_16(void *ps)
 	void(*expf)(float *, const int);
 	void(*wae5)(const float*, const int, float*);
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512)
 	{
@@ -3556,6 +3670,13 @@ void evalFunc_2_16(void *ps)
 		}
 	}
 
+#else
+    extract = int16_predictor ? extract_m8_i16_C_16 : extract_m8_C_16;
+    dotProd = int16_predictor ? (pss->integerDotProduct ? pss->integerDotProduct : dotProdS_C_16) : dotProd_C;
+    wae5 = weightedAvgElliottMul5_m16_C;
+    expf = (fapprox & 12) == 0 ? e2_m16_C : ((fapprox & 12) == 4 ? e1_m16_C : e0_m16_C);
+#endif
+
 	uint8_t b = pss->current_plane;
 
 	if (((b==0) && pss->Y) || ((b==1) && pss->U) || ((b==2) && pss->V) || ((b==3) && pss->A))
@@ -3627,6 +3748,7 @@ void evalFunc_2_16(void *ps)
 				NNPixels+=NNPixels_pitch_2;
 			}
 		}
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 		else
 		{
 			if (opt>=4)
@@ -3682,6 +3804,7 @@ void evalFunc_2_16(void *ps)
 				}
 			}
 		}
+#endif
 	}
 }
 
@@ -3743,6 +3866,7 @@ void evalFunc_2_32(void *ps)
 	void(*expf)(float *, const int);
 	void(*wae5)(const float*, const int, float*);
 
+#if defined(_WIN32) || defined(NNEDI3_X86_ASM)
 #ifdef AVX512_BUILD_POSSIBLE
 	if (AVX512)
 	{
@@ -3839,6 +3963,13 @@ void evalFunc_2_32(void *ps)
 			}
 		}
 	}
+
+#else
+    extract = extract_m8_C_32;
+    dotProd = dotProd_C;
+    wae5 = weightedAvgElliottMul5_m16_C;
+    expf = (fapprox & 12) == 0 ? e2_m16_C : ((fapprox & 12) == 4 ? e1_m16_C : e0_m16_C);
+#endif
 
 	uint8_t b = pss->current_plane;
 
@@ -3947,6 +4078,18 @@ void nnedi3::StaticThreadpool(void *ptr)
 }
 
 
+// Factories can return a chain ending in a stateless converter/resizer. Its
+// MT hint must not hide the mutable nnedi3 instances inside that chain.
+class nnedi3Pipeline : public GenericVideoFilter
+{
+public:
+    explicit nnedi3Pipeline(PClip clip) : GenericVideoFilter(clip) {}
+    int __stdcall SetCacheHints(int hint, int) override
+    {
+        return hint == CACHE_GET_MTMODE ? MT_MULTI_INSTANCE : 0;
+    }
+};
+
 AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironment* env)
 {
 	if (!args[0].IsClip())
@@ -3971,7 +4114,7 @@ AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironmen
 			env->ThrowError("nnedi3: only planar, YUY2 and RGB24 input are supported!");				
 	}
 
-	const int threads=args[11].AsInt(0);
+	const int threads=args[11].AsInt(default_threads);
 	const bool LogicalCores=args[14].AsBool(true);
 	const bool MaxPhysCores=args[15].AsBool(true);
 	const bool SetAffinity=args[16].AsBool(false);
@@ -3979,7 +4122,9 @@ AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironmen
 	int thread_level=args[21].AsInt(6);
 
 	negativePrefetch=(prefetch<0)?true:false;
-	prefetch=abs(prefetch);
+	if (prefetch < -MAX_THREAD_POOL || prefetch > MAX_THREAD_POOL)
+        env->ThrowError("nnedi3: prefetch must be between -%d and %d.", MAX_THREAD_POOL, MAX_THREAD_POOL);
+    prefetch=abs(prefetch);
 
 	if ((threads<0) || (threads>MAX_MT_THREADS))
 		env->ThrowError("nnedi3: [threads] must be between 0 and %ld.",MAX_MT_THREADS);
@@ -3995,6 +4140,7 @@ AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironmen
 
 	uint8_t threads_number=1;
 
+#ifdef _WIN32
 	if (threads!=1)
 	{
 		const ThreadLevelName TabLevel[8]={NoneThreadLevel,IdleThreadLevel,LowestThreadLevel,
@@ -4044,6 +4190,9 @@ AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironmen
 			}
 		}
 	}
+#else
+    threads_number = resolveThreads(threads, LogicalCores, prefetch);
+#endif
 
 	if (!vi.IsY8())
 	{
@@ -4057,11 +4206,11 @@ AVSValue __cdecl Create_nnedi3(AVSValue args, void* user_data, IScriptEnvironmen
 				args[3].AsBool(true),args[4].AsBool(true),args[5].AsBool(true),args[17].AsBool(true),
 				args[6].AsInt(6),args[7].AsInt(1),args[8].AsInt(1),args[9].AsInt(0),args[10].AsInt(2),
 				threads_number,args[12].AsInt(0),args[13].AsInt(15),args[18].AsBool(false),args[20].AsInt(1),negativePrefetch,avsp,env);
-			if (RGB32) return env->Invoke("ConvertToRGB32",v).AsClip();
+			if (RGB32) return new nnedi3Pipeline(env->Invoke("ConvertToRGB32",v).AsClip());
 			else
 			{
-				if (RGB48) return env->Invoke("ConvertToRGB48",v).AsClip();
-				else return env->Invoke("ConvertToRGB64",v).AsClip();
+				if (RGB48) return new nnedi3Pipeline(env->Invoke("ConvertToRGB48",v).AsClip());
+				else return new nnedi3Pipeline(env->Invoke("ConvertToRGB64",v).AsClip());
 			}
 		}
 		else return new nnedi3(args[0].AsClip(),args[1].AsInt(-1),args[2].AsBool(false),
@@ -4117,7 +4266,7 @@ AVSValue __cdecl Create_nnedi3_rpow2(AVSValue args, void* user_data, IScriptEnvi
 	const int fheight = args[9].IsInt() ? args[9].AsInt() : rfactor*vi.height;
 	const float ep0 = (float)(args[10].IsFloat() ? args[10].AsFloat() : -FLT_MAX);
 	const float ep1 = (float)(args[11].IsFloat() ? args[11].AsFloat() : -FLT_MAX);
-	const int threads = args[12].AsInt(0);
+	const int threads = args[12].AsInt(default_threads);
 	const int opt = args[13].AsInt(0);
 	const int fapprox = args[14].AsInt(15);
 	const bool chroma_shift_resize = args[15].AsBool(true);
@@ -4136,7 +4285,9 @@ AVSValue __cdecl Create_nnedi3_rpow2(AVSValue args, void* user_data, IScriptEnvi
 	int thread_level_rs=args[28].AsInt(6);
 
 	negativePrefetch=(prefetch<0)?true:false;
-	prefetch=abs(prefetch);
+	if (prefetch < -MAX_THREAD_POOL || prefetch > MAX_THREAD_POOL)
+        env->ThrowError("nnedi3: prefetch must be between -%d and %d.", MAX_THREAD_POOL, MAX_THREAD_POOL);
+    prefetch=abs(prefetch);
 
 	if ((rfactor<2) || (rfactor>1024)) env->ThrowError("nnedi3_rpow2: 2 <= rfactor <= 1024, and rfactor be a power of 2!\n");
 	int rf=1,ct=0;
@@ -4175,6 +4326,7 @@ AVSValue __cdecl Create_nnedi3_rpow2(AVSValue args, void* user_data, IScriptEnvi
 
 	uint8_t threads_number=1;
 
+#ifdef _WIN32
 	if (threads!=1)
 	{
 		const ThreadLevelName TabLevel[8]={NoneThreadLevel,IdleThreadLevel,LowestThreadLevel,
@@ -4224,6 +4376,9 @@ AVSValue __cdecl Create_nnedi3_rpow2(AVSValue args, void* user_data, IScriptEnvi
 			}
 		}
 	}
+#else
+    threads_number = resolveThreads(threads, LogicalCores, prefetch);
+#endif
 
 	AVSValue v = args[0].AsClip();
 
@@ -4756,19 +4911,29 @@ AVSValue __cdecl Create_nnedi3_rpow2(AVSValue args, void* user_data, IScriptEnvi
 	{
 		env->ThrowError("nnedi3_rpow2: error using env->invoke (function not found)!\n");
 	}
-	return v;
+	return new nnedi3Pipeline(v.AsClip());
 }
 
 const AVS_Linkage *AVS_linkage = nullptr;
 
 
-extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScriptEnvironment* env, const AVS_Linkage* const vectors)
+#ifdef _WIN32
+#define NNEDI3_EXPORT __declspec(dllexport)
+#else
+#define NNEDI3_EXPORT __attribute__((visibility("default")))
+#endif
+extern "C" NNEDI3_EXPORT const char* __stdcall AvisynthPluginInit3(IScriptEnvironment* env, const AVS_Linkage* const vectors)
 {
 	AVS_linkage = vectors;
 
+#ifdef _WIN32
 	poolInterface=ThreadPoolInterface::Init(0);
 
 	if (!poolInterface->GetThreadPoolInterfaceStatus()) env->ThrowError("nnedi3: Error with the TheadPool status!");
+
+#else
+    env->CheckVersion(8);
+#endif
 
 	env->AddFunction("nnedi3", "c[field]i[dh]b[Y]b[U]b[V]b[nsize]i[nns]i[qual]i[etype]i[pscrn]i" \
 		"[threads]i[opt]i[fapprox]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[A]b[sleep]b[prefetch]i" \

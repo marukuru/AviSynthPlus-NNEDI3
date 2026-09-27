@@ -18,15 +18,22 @@
 **   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-#include <windows.h>
+#include "platform.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
+#ifdef _WIN32
 #include <tchar.h>
+#endif
 #include <float.h>
 #include <stdio.h>
-#include "./avisynth.h"
 #include "./PlanarFrame.h"
+#ifdef _WIN32
 #include "./ThreadPoolInterface.h"
+#else
+#include "Parallel.h"
+#include "PortableKernels.h"
+#include <memory>
+#endif
 
 #define NUM_NSIZE 7
 #define NUM_NNS 5
@@ -65,6 +72,9 @@ struct PS_INFO {
 	uint8_t bits_per_pixel;
 	uint16_t *val_min_max;
 	IScriptEnvironment *env;
+#ifndef _WIN32
+    DotProduct integerDotProduct;
+#endif
 };
 
 class nnedi3 : public GenericVideoFilter
@@ -79,6 +89,9 @@ protected:
 	float *weights0,*weights1[2];
 	uint8_t threads,threads_number;
 	bool sleep;
+#ifndef _WIN32
+	std::unique_ptr<ParallelExecutor> executor;
+#endif
 	Public_MT_Data_Thread MT_Thread[MAX_MT_THREADS];
 	uint32_t UserId;
 	uint8_t *NNPixels[PLANE_MAX];

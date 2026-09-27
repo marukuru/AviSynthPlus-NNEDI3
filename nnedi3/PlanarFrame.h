@@ -24,11 +24,14 @@
 #ifndef __PlanarFrame_H__
 #define __PlanarFrame_H__
 
-#include <windows.h>
+#include "platform.h"
 #include <malloc.h>
 #include <stdint.h>
-#include "./internal.h"
+#ifdef _WIN32
 #include "./avs/cpuid.h"
+#else
+#include <avs/cpuid.h>
+#endif
 
 #define MIN_PAD 10
 #define MIN_ALIGNMENT 64

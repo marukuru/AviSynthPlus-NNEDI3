@@ -1,0 +1,10 @@
+.section .rodata
+.balign 64
+.globl nnedi3_weights
+.hidden nnedi3_weights
+nnedi3_weights:
+.incbin "@CMAKE_CURRENT_SOURCE_DIR@/nnedi3/binary1.bin"
+.globl nnedi3_weights_end
+.hidden nnedi3_weights_end
+nnedi3_weights_end:
+.section .note.GNU-stack,"",%progbits

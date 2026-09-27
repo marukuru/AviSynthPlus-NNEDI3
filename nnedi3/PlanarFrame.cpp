@@ -23,10 +23,13 @@
 
 #include "./PlanarFrame.h"
 #include <stdint.h>
+#ifdef _WIN32
 #include <intrin.h>
+#endif
 
 #define myalignedfree(ptr) if (ptr!=nullptr) { _aligned_free(ptr); ptr=nullptr;}
 
+#ifdef _WIN32
 extern "C" void convYUY2to422_MMX(const uint8_t *src,uint8_t *py,uint8_t *pu,uint8_t *pv,int pitch1,int pitch2Y,int pitch2UV,
 	int width,int height);
 extern "C" void convYUY2to422_SSE2(const uint8_t *src,uint8_t *py,uint8_t *pu,uint8_t *pv,int pitch1,int pitch2Y,int pitch2UV,
@@ -138,6 +141,9 @@ static int CPUCheckForExtensions()
   return result;
 }
 
+#else
+static int CPUCheckForExtensions() { return 0; }
+#endif
 
 int modnpf(const int m, const int n)
 {
@@ -725,6 +731,7 @@ PlanarFrame& PlanarFrame::operator=(PlanarFrame &ob2)
 void PlanarFrame::convYUY2to422(const uint8_t *src,uint8_t *py,uint8_t *pu,uint8_t *pv,int pitch1,int pitch2Y,int pitch2UV,
 	int width,int height)
 {
+#ifdef _WIN32
 	if (((cpu&CPUF_AVX)!=0) && useAVX && (((size_t(src)|pitch1)&15)==0))
 		convYUY2to422_AVX(src,py,pu,pv,pitch1,pitch2Y,pitch2UV,(width+7)>>3,height);
 	else
@@ -735,6 +742,7 @@ void PlanarFrame::convYUY2to422(const uint8_t *src,uint8_t *py,uint8_t *pu,uint8
 		{
 			if (((cpu&CPUF_MMX)!=0) && useSIMD) convYUY2to422_MMX(src,py,pu,pv,pitch1,pitch2Y,pitch2UV,width,height);
 			else
+#endif
 			{
 				width >>= 1;
 				for (int y=0; y<height; ++y)
@@ -756,8 +764,10 @@ void PlanarFrame::convYUY2to422(const uint8_t *src,uint8_t *py,uint8_t *pu,uint8
 					src += pitch1;
 				}
 			}
+#ifdef _WIN32
 		}
 	}
+#endif
 }
 
 
@@ -767,6 +777,7 @@ void PlanarFrame::conv422toYUY2(uint8_t *py,uint8_t *pu,uint8_t *pv,uint8_t *dst
 	const int w_8=(width+7)>>3;
 	const int modulo2=pitch2-(w_8 << 4);
 
+#ifdef _WIN32
 	if (((cpu&CPUF_AVX)!=0) && useAVX) conv422toYUY2_AVX(py,pu,pv,dst,pitch1Y,pitch1UV,modulo2,w_8,height);
 	else
 	{
@@ -775,6 +786,7 @@ void PlanarFrame::conv422toYUY2(uint8_t *py,uint8_t *pu,uint8_t *pv,uint8_t *dst
 		{
 			if (((cpu&CPUF_MMX)!=0) && useSIMD) conv422toYUY2_MMX(py,pu,pv,dst,pitch1Y,pitch1UV,pitch2,width,height);
 			else
+#endif
 			{
 				width >>= 1;
 				for (int y=0; y<height; ++y)
@@ -796,8 +808,10 @@ void PlanarFrame::conv422toYUY2(uint8_t *py,uint8_t *pu,uint8_t *pv,uint8_t *dst
 					dst += pitch2;
 				}
 			}
+#ifdef _WIN32
 		}
 	}
+#endif
 }
 
 
