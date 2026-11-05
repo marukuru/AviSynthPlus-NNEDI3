@@ -1,7 +1,7 @@
                                                                                                     |
                                 nnedi3 for Avisynth by tritical                                     |
                                        modified by JPSDR                                            |
-                                     v0.9.4.69 (15/08/2026)                                         |
+                                     v0.9.4.70 (28/09/2026)                                         |
                                            HELP FILE                                                |
 -----------------------------------------------------------------------------------------------------
 -----------------------------------------------------------------------------------------------------
@@ -411,6 +411,9 @@ nnedi3_rpow2 EXAMPLES:
 
 
 CHANGE LIST:
+   28/09/2026  v0.9.4.70
+       + Update to new AviSynth+ header.
+
    15/08/2026  v0.9.4.69
        * Some asm and multithreading improvements, some AVX-512 bug and crash fixes, update avs header.
 
